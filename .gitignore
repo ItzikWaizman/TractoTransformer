@@ -1,0 +1,3 @@
+# Virtual enviorment containing compatible scil version to resample streamlines
+/utils/streamline-resample-venv/
+__pycache__
