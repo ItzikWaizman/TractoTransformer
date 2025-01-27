@@ -15,6 +15,7 @@ def parse_args():
     """ Data Parameters """
     parser.add_argument('--num_gradients', type=int, default=65, help='Number of gradient directions in the data.')
     parser.add_argument('--train_ratio', type=float, default=0.8, help='Portion of the subjects that will used for train data.')
+    parser.add_argument('--batch_size', type=int, default=100, help='Data loader batch size.')
 
     args = parser.parse_args()
     return args
