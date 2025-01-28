@@ -37,6 +37,7 @@ class DataHandler:
         # Get max_sequence_length
         self.max_sequence_length = self.train_dataset.get_max_seq_length()
 
+
 class ShardsDataset(Dataset):
     def __init__(self, shards_directory, subject_id_to_dwi_entry):
         self.subject_id_to_dwi_entry = subject_id_to_dwi_entry

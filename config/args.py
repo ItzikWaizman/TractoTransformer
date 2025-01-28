@@ -17,5 +17,13 @@ def parse_args():
     parser.add_argument('--train_ratio', type=float, default=0.8, help='Portion of the subjects that will used for train data.')
     parser.add_argument('--batch_size', type=int, default=100, help='Data loader batch size.')
 
+    """ Model Parameters """
+    parser.add_argument('--num_decoder_layers', type=int, default=8, help='Number of transformer decoder layers.')
+    parser.add_argument('--nhead', type=int, default=10, help='Number of heads in the multi head self attention of the TrasfoemerEncoderLayer.')
+    parser.add_argument('--ff_dim', type=int, default=512, help='Dimension of the feed-forward network in Transformer Encoder layer.')
+    parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout probability.')
+    parser.add_argument('--max_positions', type=int, default=250, help='Number of positions to encode by Positional Encoder layer')
+    parser.add_argument('--output_size', type=int, default=725, help='The output size of the network.')
+
     args = parser.parse_args()
     return args
