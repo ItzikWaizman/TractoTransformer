@@ -2,6 +2,7 @@ import os
 import glob
 import torch
 from nibabel import streamlines
+from dipy.data import get_sphere
 
 EoF = 724
 
@@ -138,3 +139,40 @@ def get_streamline_labels(streamline, actual_size, sphere):
     labels[:actual_size-1] = closest_indices
 
     return labels
+
+
+def build_soft_labels_tensor(sigma=0.1):
+    """
+    Constructs a tensor that maps labels (shepre vector index or EoF index) to corresponding 
+    Gaussian weighted soft labels (log probability vectors over the sphere vectors or EoF).
+
+    Parameters:
+    - sigma - standard deviation of the gaussian weights
+    
+    Returns:
+    - soft_labels_tensor: tensor of soft labels [num_sphere_vectors+1, num_sphere_vectors+1]
+    """
+
+    sphere = get_sphere('repulsion724')
+
+    # Get the sphere vectors
+    sphere_vectors = torch.tensor(sphere.vertices, dtype=torch.float32)
+    num_sphere_vectors = sphere_vectors.shape[0]
+
+    soft_labels_tensor = torch.zeros(num_sphere_vectors+1, num_sphere_vectors+1)
+
+    # Compute cosine similarity between all pairs of sphere vectors
+    cosine_similarity = torch.matmul(sphere_vectors, sphere_vectors.T)
+    cosine_similarity = torch.clamp(cosine_similarity, -1.0, 1.0)
+
+    # Convert cosine similarity to distance on the unit sphere
+    distances = torch.acos(cosine_similarity)
+
+    # Compute gaussian weighted soft labels
+    gaussian_weights = torch.exp(-distances**2 / (2 * sigma**2))
+    soft_labels_tensor[:num_sphere_vectors, :num_sphere_vectors] = gaussian_weights / gaussian_weights.sum(dim=1, keepdim=True)
+
+    # End of Fiber (EoF) soft label is a one-hot vector
+    soft_labels_tensor[num_sphere_vectors, num_sphere_vectors] = 1.0
+
+    return soft_labels_tensor
