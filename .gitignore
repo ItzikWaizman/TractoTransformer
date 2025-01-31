@@ -1,3 +1,5 @@
 # Virtual enviorment containing compatible scil version to resample streamlines
 /utils/streamline-resample-venv/
 __pycache__
+checkpoints/
+trained_model/
