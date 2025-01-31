@@ -11,6 +11,8 @@ def parse_args():
 
     """ General Parameters """
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='Whether to use GPU or CPU as the device.', choices=['cuda', 'cpu'])
+    parser.add_argument('--train', type=bool, default=True, help='Run TractoTransformer script with train mode.')
+    parser.add_argument('--track', type=bool, default=False, help='Run TractoTransformer script with track mode.')
 
     """ Data Parameters """
     parser.add_argument('--num_gradients', type=int, default=65, help='Number of gradient directions in the data.')
@@ -27,8 +29,8 @@ def parse_args():
     parser.add_argument('--output_size', type=int, default=725, help='The output size of the network.')
 
     """ Training Parameters """
-    parser.add_argument('--trained_model_path', type=str, default='trained_model/model.pt', help='Path for saving the model after training.')
-    parser.add_argument('--save_checkpoints', type=bool, default=True, help='Whether to save model checkpoints during training or not.')
+    parser.add_argument('--trained_model_path', type=str, default='trained_model/model.pth', help='Path for saving the model after training.')
+    parser.add_argument('--save_checkpoints', type=bool, default=False, help='Whether to save model checkpoints during training or not.')
     parser.add_argument('--checkpoint_path', type=str, default='checkpoints/checkpoint_cnn_tracto_inferno.pth', help='Path to save the training checkpoints.')
     parser.add_argument('--learning_rate', type=float, default=0.0001, help='Training learning rate.')
     parser.add_argument('--decay_lr', type=bool, default=True, help='Whether to use learning rate decay during training.')
