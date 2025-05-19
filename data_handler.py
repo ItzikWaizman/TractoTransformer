@@ -1,10 +1,8 @@
 import lmdb
-import pickle
 import os
 import torch
 from io import BytesIO
-from torch.utils.data import Dataset, DataLoader
-
+from torch.utils.data import Dataset
 
 class DataHandler:
     def __init__(self, args):
@@ -19,16 +17,16 @@ class DataHandler:
         processed_data_directory = args.processed_data_directory
 
         self.device = args.device
-        self.train_dir = os.path.join(processed_data_directory, "train")
-        self.val_dir = os.path.join(processed_data_directory, "val")
+        self.train_dir = os.path.join(processed_data_directory, "trainset")
+        self.val_dir = os.path.join(processed_data_directory, "validset")
 
         # Load train and validation brains
-        self.train_brains = torch.load(os.path.join(self.train_dir, "dwi", "train_dwi_data.pt"))
-        self.val_brains = torch.load(os.path.join(self.val_dir, "dwi", "val_dwi_data.pt"))
+        self.train_brains = torch.load(os.path.join(self.train_dir, "dwi", "trainset_dwi_data.pt"), map_location=args.device)
+        self.val_brains = torch.load(os.path.join(self.val_dir, "dwi", "validset_dwi_data.pt"), map_location=args.device)
 
         # Load train and validation subject maps
-        self.train_subjects_map = torch.load(os.path.join(self.train_dir, "dwi", "train_idx_map.pt"))
-        self.val_subjects_map = torch.load(os.path.join(self.val_dir, "dwi", "val_idx_map.pt"))
+        self.train_subjects_map = torch.load(os.path.join(self.train_dir, "dwi", "trainset_idx_map.pt"))
+        self.val_subjects_map = torch.load(os.path.join(self.val_dir, "dwi", "validset_idx_map.pt"))
 
         # Create Dataset instances
         self.train_dataset = ShardsDataset(os.path.join(self.train_dir, "shards"), self.train_subjects_map)
@@ -52,8 +50,8 @@ class ShardsDataset(Dataset):
             env = lmdb.open(lmdb_file, readonly=True)
             with env.begin() as txn:
                 cursor = txn.cursor()
-                for key, _ in cursor:
-                    self.data.append((lmdb_file, key.decode()))
+                keys = [key.decode() for key, _ in cursor]
+                self.data.extend([(lmdb_file, key) for key in keys])
             env.close()
 
     def __len__(self):
