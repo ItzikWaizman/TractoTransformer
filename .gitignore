@@ -3,3 +3,5 @@
 __pycache__
 checkpoints/
 trained_model/
+output_tractogram/
+/.log
