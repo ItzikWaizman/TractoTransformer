@@ -173,15 +173,9 @@ class TractoTransformerTrainer(object):
 
 
     def train(self):
-        #if self.rank == 0:
-        #    log_dir = "logs"
-        #    stats_path = os.path.join(log_dir, 'train_val_stats_v2.pkl')
-        #    writer = SummaryWriter(log_dir=log_dir)
-        #    writer.add_hparams(fetch_hyper_params(self.params), {})
-        #    writer.add_text('FODFs prediction', 'This is an experiment ONE fiber bundle', 0)
-
         train_stats, val_stats = self.train_stats, self.val_stats
         for epoch in range(self.start_epoch, self.params.epochs):
+            self.train_sampler.set_epoch(epoch)
             self.logger.info("TractoTransformerTrainer: Training Epoch")
             train_metrics = self.train_epoch(self.train_loader)
             val_metrics = self.validate(self.val_loader)
@@ -189,13 +183,6 @@ class TractoTransformerTrainer(object):
             # Print epoch message
             if self.rank == 0:
                 self.logger.info(get_epoch_message(self, train_metrics, val_metrics, epoch))
-
-                # Log metrics
-                #for metric_name, metric_value in train_metrics.items():
-                #    writer.add_scalar(f'Train/{metric_name}', metric_value, epoch)
-            
-                #for metric_name, metric_value in val_metrics.items():
-                #    writer.add_scalar(f'Val/{metric_name}', metric_value, epoch)
 
                 # Save statistics
                 train_stats.append((train_metrics['loss'], train_metrics['accuracy_top_1'], train_metrics['accuracy_top_k1'], train_metrics['accuracy_top_k2']))
@@ -207,6 +194,7 @@ class TractoTransformerTrainer(object):
 
         if self.rank == 0 and self.params.save_checkpoints:
             save_checkpoints(self, train_stats, val_stats, epoch+1)
-            #writer.flush()
-            #writer.close()
+            if self.params.save_model:
+                save_model(self)
+
         return train_stats, val_stats

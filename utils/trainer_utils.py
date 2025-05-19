@@ -144,3 +144,10 @@ def save_checkpoints(trainer, train_stats, val_stats, epoch):
     }
     torch.save(checkpoint, trainer.params.checkpoint_path)
     trainer.logger.info(f"Checkpoint saved: {trainer.params.checkpoint_path}")
+
+def save_model(trainer):
+    model_data = {
+        'model_state_dict': trainer.network.state_dict(),
+        'max_streamline_length' : trainer.data_handler.max_sequence_length
+    }
+    torch.save(model_data, trainer.params.trained_model_path)
