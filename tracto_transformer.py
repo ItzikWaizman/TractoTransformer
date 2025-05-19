@@ -35,7 +35,8 @@ def main(rank, world_size, args):
         torch.save(trainer.network.state_dict(), args.trained_model_path)
 
     if args.track:
-        pass
+        tracker = Tracker(logger=logger, params=args)
+        tracker.track()
 
     cleanup()
 
