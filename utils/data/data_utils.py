@@ -252,9 +252,6 @@ def get_spherical_harmonics_coefficients(dwi_weights, bvecs, sh_order, smooth=0.
     return data_sh
 
 def resample_and_normalize_dwi(dwi, bvecs, sh_order=12, smooth=0, directions=None):
-    if directions is None:
-        directions = bvecs
-
     data_sh = get_spherical_harmonics_coefficients(dwi, bvecs, sh_order=sh_order, smooth=smooth)
 
     sphere = get_sphere('repulsion100')
