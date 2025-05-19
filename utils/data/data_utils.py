@@ -3,6 +3,9 @@ import glob
 import torch
 from nibabel import streamlines
 from dipy.data import get_sphere
+from dipy.reconst.shm import sph_harm_lookup, smooth_pinv
+from dipy.core.sphere import Sphere
+import numpy as np
 
 EoF = 724
 
@@ -22,13 +25,11 @@ def extract_subject_paths(subject_folder):
     mask_folder = os.path.join(subject_folder, "mask")
     wm_mask_path = glob.glob(os.path.join(mask_folder, "*mask_wm*"))[0]
 
-    # Extract fodf
-    fodf_folder = os.path.join(subject_folder, "fodf")
-    fodf_path = glob.glob(os.path.join(fodf_folder, "*fodf*"))[0]
-
     # Extract fractional anisotropy
     fa_folder = os.path.join(subject_folder, "dti")
-    fa_path = glob.glob(os.path.join(fa_folder, "*fa*"))[0]
+    fa_path = None
+    if os.path.exists(fa_folder):
+        fa_path = glob.glob(os.path.join(fa_folder, "*fa*"))[0]
 
     # Extract tractography folder path
     tractography_folder = os.path.join(subject_folder, "tractography")
@@ -37,10 +38,6 @@ def extract_subject_paths(subject_folder):
     if os.path.exists(tractography_resampled):
         tractography_folder = tractography_resampled
 
-    # Extract spherical harmonics path
-    sh_folder = os.path.join(subject_folder, "sh")
-    sh_path = glob.glob(os.path.join(sh_folder, "*sh.nii*"))[0]
-
     # Return the extracted paths
     return {
         "dwi_data": dwi_data_path,
@@ -48,13 +45,10 @@ def extract_subject_paths(subject_folder):
         "bvecs": bvec_path,
         "wm_mask": wm_mask_path,
         "tractography_folder": tractography_folder,
-        "sh": sh_path,
-        "fodf": fodf_path,
         "fa": fa_path
     }
 
-
-def load_tractogram(tractography_folder):
+def load_tractogram(tractography_folder, reverse_streamlines=True):
     folder_path = tractography_folder
 
     # Get a list of all .trk files in the specified folder
@@ -69,8 +63,12 @@ def load_tractogram(tractography_folder):
             tractogram_header = current_tractogram.header
         merged_streamlines.extend(current_tractogram.streamlines)
 
-    return merged_streamlines, tractogram_header
+    if reverse_streamlines:
+        for streamline in merged_streamlines.copy():
+            reversed_streamline = streamline[::-1].copy()  # Reverse the streamline
+            merged_streamlines.append(reversed_streamline)  # Append the reversed streamline
 
+    return merged_streamlines, tractogram_header
 
 def get_streamline_tensor(tractography_folder, padded_length):
     """
@@ -87,7 +85,7 @@ def get_streamline_tensor(tractography_folder, padded_length):
     """
 
     # Prepare streamlines
-    np_streamlines, _ = load_tractogram(tractography_folder)
+    np_streamlines, tractogram_header = load_tractogram(tractography_folder)
 
     padded_streamlines = torch.zeros(len(np_streamlines), padded_length, 3, dtype=torch.float32)
     streamline_lengths = []
@@ -99,8 +97,60 @@ def get_streamline_tensor(tractography_folder, padded_length):
 
     streamline_lengths = torch.tensor(streamline_lengths, dtype=torch.int)
 
-    return padded_streamlines, streamline_lengths
+    return padded_streamlines, streamline_lengths, tractogram_header
 
+def load_tractograms(tractography_folder, reverse_streamlines=True):
+    folder_path = tractography_folder
+
+    # Get a list of all .trk files in the specified folder
+    trk_files = [file for file in os.listdir(folder_path) if file.endswith(".trk")]
+    tractogram_header = None
+
+    bundles = []
+    bundle_names = []
+
+    for trk_file in trk_files:
+        file_path = os.path.join(folder_path, trk_file)
+        current_tractogram = streamlines.load(file_path)
+
+        if tractogram_header is None:
+            tractogram_header = current_tractogram.header
+
+        bundle_name = trk_file.split("__")[1].replace(".trk", "")
+        bundle_streamlines = []
+        bundle_streamlines.extend(current_tractogram.streamlines)
+
+        if reverse_streamlines:
+            for streamline in bundle_streamlines.copy():
+                reversed_streamline = streamline[::-1].copy()  # Reverse the streamline
+                bundle_streamlines.append(reversed_streamline)  # Append the reversed streamline
+
+        bundles.append(bundle_streamlines)
+        bundle_names.append(bundle_name)
+
+    return bundles, bundle_names, tractogram_header
+
+def get_streamline_tensors(tractography_folder, padded_length):
+    # Prepare streamlines
+    np_bundles, bundle_names, tractogram_header = load_tractograms(tractography_folder)
+
+    padded_streamline_bundles = []
+    bundles_sreamline_lengths = []
+
+    for np_streamlines in np_bundles:
+        padded_streamlines = torch.zeros(len(np_streamlines), padded_length, 3, dtype=torch.float32)
+        streamline_lengths = []
+
+        for i, np_streamline in enumerate(np_streamlines):
+            length = len(np_streamline)
+            streamline_lengths.append(length)
+            padded_streamlines[i, :length, :] = torch.tensor(np_streamline, dtype=torch.float32)
+
+        streamline_lengths = torch.tensor(streamline_lengths, dtype=torch.int)
+        padded_streamline_bundles.append(padded_streamlines)
+        bundles_sreamline_lengths.append(streamline_lengths)
+
+    return padded_streamline_bundles, bundles_sreamline_lengths, bundle_names, tractogram_header
 
 def get_streamline_labels(streamline, actual_size, sphere):
     """
@@ -140,7 +190,6 @@ def get_streamline_labels(streamline, actual_size, sphere):
 
     return labels
 
-
 def build_soft_labels_tensor(sigma=0.1):
     """
     Constructs a tensor that maps labels (shepre vector index or EoF index) to corresponding 
@@ -176,3 +225,49 @@ def build_soft_labels_tensor(sigma=0.1):
     soft_labels_tensor[num_sphere_vectors, num_sphere_vectors] = 1.0
 
     return soft_labels_tensor
+
+def normalize_brain(brain):
+    epsilon = 1e-6
+    b0 = brain[..., 0:1]
+
+    # Normalize all gradient directions, including b0 itself
+    brain /= (b0 + epsilon)
+
+    return torch.clamp(brain, min=0, max=1)
+
+def get_spherical_harmonics_coefficients(dwi_weights, bvecs, sh_order, smooth=0.006):
+    # Extract diffusion weights and normalize by the b0.
+    bvecs = bvecs[1:, :]
+    weights = dwi_weights[..., 1:]
+
+    # Assuming all directions are on the hemisphere.
+    raw_sphere = Sphere(xyz=bvecs)
+
+    # Fit SH to signal
+    sph_harm_basis = sph_harm_lookup.get("tournier07")
+    Ba, m, n = sph_harm_basis(sh_order, raw_sphere.theta, raw_sphere.phi)
+    L = -n * (n + 1)
+    invB = smooth_pinv(Ba, np.sqrt(smooth) * L)
+    data_sh = np.dot(weights, invB.T)
+    return data_sh
+
+def resample_and_normalize_dwi(dwi, bvecs, sh_order=12, smooth=0, directions=None):
+    if directions is None:
+        directions = bvecs
+
+    data_sh = get_spherical_harmonics_coefficients(dwi, bvecs, sh_order=sh_order, smooth=smooth)
+
+    sphere = get_sphere('repulsion100')
+    if directions is not None:
+        sphere = Sphere(xyz=directions[1:])
+
+    sph_harm_basis = sph_harm_lookup.get("tournier07")
+    Ba, m, n = sph_harm_basis(sh_order, sphere.theta, sphere.phi)
+    data_resampled = torch.tensor(np.dot(data_sh, Ba.T), dtype=torch.float32)
+
+    tensor_shape = (dwi.shape[0], dwi.shape[1], dwi.shape[2], len(directions))
+    resampled_dwi = torch.zeros(tensor_shape)
+    resampled_dwi[..., 1:] = data_resampled
+    resampled_dwi[..., 0] = dwi[..., 0]
+
+    return normalize_brain(resampled_dwi)
