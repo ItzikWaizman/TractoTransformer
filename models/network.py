@@ -28,7 +28,7 @@ class TractoTransformer(nn.Module):
         # Save causality mask
         self.causality_mask = torch.triu(torch.ones(max_sequence_length, max_sequence_length, device=params.device), diagonal=1).bool() 
 
-    def forward(self, dwi_data, streamline_voxels_batch, padding_mask, brain_indices):
+    def forward(self, dwi_data, streamline_voxels_batch, padding_mask, brain_indices, past_kvs=None, use_cache=False):
         # Use 3D CNN to account for dwi values in the enviorment of each voxel in a steamline
         center_features = self.cnn3d_layer(dwi_data, streamline_voxels_batch, brain_indices)
 
@@ -36,8 +36,12 @@ class TractoTransformer(nn.Module):
         x = self.dropout(self.positional_encoding(center_features))
 
         # Apply decoder layers
-        for decoder_layer in self.decoder_layers:
-            x = decoder_layer(x, self.causality_mask, padding_mask)
+        new_kvs = [] if use_cache else None
+        for i, decoder_layer in enumerate(self.decoder_layers):
+            past_kv = past_kvs[i] if past_kvs is not None else None
+            x, new_kv = decoder_layer(x, self.causality_mask, padding_mask, past_kv=past_kv, use_cache=use_cache)
+            if use_cache:
+                new_kvs.append(new_kv)
 
         # Project to the number of possible directions
         outputs = self.projection(x)
@@ -57,9 +61,18 @@ class TransformerDecoderBlock(nn.Module):
         self.ff = PositionWiseFeedForward(embed_dim, ff_dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, causality_mask, padding_mask):
-        # Self-attention with masking
-        attn_output, _ = self.self_attn(x, x, x, attn_mask=causality_mask, key_padding_mask=padding_mask, is_causal=True)
+    def forward(self, x, causality_mask, padding_mask, past_kv=None, use_cache=False):
+        # Self-attention with optional past KV
+        attn_output, attn_weights = self.self_attn(
+            x,                                   # query
+            torch.cat([past_kv[0], x], dim=1) if past_kv is not None else x,  # key
+            torch.cat([past_kv[1], x], dim=1) if past_kv is not None else x,  # value
+            attn_mask=causality_mask,
+            key_padding_mask=padding_mask,
+            is_causal=True,
+            need_weights=False
+        )
+
         x = x + self.dropout(attn_output)
         x = self.layer_norm1(x)
 
@@ -68,7 +81,13 @@ class TransformerDecoderBlock(nn.Module):
         x = x + self.dropout(ff_output)
         x = self.layer_norm2(x)
 
-        return x
+        # Output new KV if caching is enabled
+        if use_cache:
+            new_kv = (torch.cat([past_kv[0], x], dim=1) if past_kv else x,
+                    torch.cat([past_kv[1], x], dim=1) if past_kv else x)
+            return x, new_kv
+        else:
+            return x, None
 
 
 class PositionWiseFeedForward(nn.Module):

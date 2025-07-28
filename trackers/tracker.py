@@ -81,7 +81,10 @@ class Tracker(object):
                 # Get the fodfs from the model
                 voxel_streamlines = ras_to_voxel(streamlines, self.inverse_affine).to(self.params.device)
                 indices = torch.zeros(self.params.track_batch_size, dtype=torch.int32, device=self.params.device)
-                log_fodfs = self.model(self.dwi, voxel_streamlines, padding_mask, indices)
+                if step == 0:
+                    log_fodfs, past_kvs = self.model(self.dwi, voxel_streamlines, padding_mask, indices, use_cache=True)
+                else:
+                    log_fodfs, past_kvs = self.model(self.dwi, voxel_streamlines, padding_mask, indices, past_kvs=past_kvs, use_cache=True)
                 fodfs = torch.exp(log_fodfs)
 
                 # Calculate the next positions and the terminated streamlines of the current iteration from fodf.
