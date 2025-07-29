@@ -21,11 +21,13 @@ class Tracker(object):
         if params.normalize_brain:
             self.dwi = normalize_brain(self.dwi)
         self.reference_tractogram, self.streamlines_lengths, self.tractogram_header = (None, None, None) if params.track_mode == 'inference' else self.load_ref_tract()
-        self.directions = self.reference_tractogram[:, 1:, :] - self.reference_tractogram[:, :-1, :]
+        if self.reference_tractogram is not None:
+            self.directions = self.reference_tractogram[:, 1:, :] - self.reference_tractogram[:, :-1, :]
 
         # DEBUG CODE FOR ISMRM
-        self.tractogram_affine = torch.tensor(self.tractogram_header['voxel_to_rasmm'], dtype=torch.float32)
-        self.tractogram_inverse_affine = torch.inverse(self.tractogram_affine)
+        if self.tractogram_header is not None:
+            self.tractogram_affine = torch.tensor(self.tractogram_header['voxel_to_rasmm'], dtype=torch.float32)
+            self.tractogram_inverse_affine = torch.inverse(self.tractogram_affine)
 
     def load_trained_model(self, logger):
         model_data = torch.load(self.params.trained_model_path)
@@ -54,61 +56,124 @@ class Tracker(object):
         return dwi_data, mask_data, fa_map_data, affine, inverse_affine
 
     def load_ref_tract(self):
-        streamlines_padded_len = self.model.causality_mask.shape[0]
+        streamlines_padded_len = self.model.max_sequence_length  # Use the stored max_sequence_length
         tractography_folder = self.test_subject_data_paths['tractography_folder']
         return get_streamline_tensor(tractography_folder, streamlines_padded_len)
-        #return get_streamline_tensor(tractography_folder, self.params.max_track_len) #streamlines_padded_len)
 
     def streamlines_tracking(self, seed_points, sphere):
         """
         Parameters: 
-        - seed_points: Tensor of shape [batch_size, seq_length, 3] initialized to zeros except for seed_points[:, 0, :].
+        - seed_points: Tensor of shape [batch_size, 3] - just the initial seed points.
         - sphere: sphere points that models the fodf classes.
 
         Returns: 
-        - Tensor of shape [batch_size, max_sequence_length, 3]  
+        - streamlines: Tensor of shape [batch_size, actual_length, 3]
+        - lengths: Tensor of shape [batch_size] with actual streamline lengths
         """
-        streamlines = seed_points.clone()
-        batch_size, max_sequence_length = streamlines.size(0), streamlines.size(1)
-
-        padding_mask = torch.ones(batch_size, max_sequence_length, dtype=torch.bool, device=self.params.device) # True where the values are padded.
-        padding_mask[:, 0] = False # The first step are the seed points and these points are not zero padded.
-        terminated_streamlines = torch.zeros(batch_size, dtype=torch.bool) # A boolean mask to indicate which streamlines have been terminated.
-
-        step = 0
+        batch_size = seed_points.size(0)
+        max_sequence_length = self.model.max_sequence_length
+        
+        # Initialize streamlines tensor to store all positions
+        streamlines = torch.zeros(batch_size, max_sequence_length, 3, device=self.params.device)
+        streamlines[:, 0, :] = seed_points  # Set seed points as first position
+        
+        # Track termination status
+        terminated_streamlines = torch.zeros(batch_size, dtype=torch.bool, device=self.params.device)
+        
+        # Initialize variables for KV-cache
+        past_kvs = None
+        current_length = 1  # We start with seed points (length 1)
+        
         with torch.no_grad():
-            while step < max_sequence_length:
-                # Get the fodfs from the model
-                voxel_streamlines = ras_to_voxel(streamlines, self.inverse_affine).to(self.params.device)
-                indices = torch.zeros(self.params.track_batch_size, dtype=torch.int32, device=self.params.device)
-                if step == 0:
-                    log_fodfs, past_kvs = self.model(self.dwi, voxel_streamlines, padding_mask, indices, use_cache=True)
-                else:
-                    log_fodfs, past_kvs = self.model(self.dwi, voxel_streamlines, padding_mask, indices, past_kvs=past_kvs, use_cache=True)
-                fodfs = torch.exp(log_fodfs)
-
-                # Calculate the next positions and the terminated streamlines of the current iteration from fodf.
-                next_positions, terminated_in_curr_iter = get_next_step_from_fodf(fodfs,
-                                                                                streamlines,
-                                                                                step, 
-                                                                                sphere, 
-                                                                                self)
-                # Update terminated_streamlines, padding_mask and streamlines
-                terminated_streamlines |= terminated_in_curr_iter
-                padding_mask[:, step+1] &= terminated_streamlines.to(self.params.device) # Clear the masking from streamlines that were not calssified as EoF.
-                streamlines[~terminated_streamlines, step+1, :] = next_positions[~terminated_streamlines, :]
+            for step in range(max_sequence_length - 1):  # -1 because we start with seed points
+                # Prepare current input - only the positions we've generated so far
+                current_streamlines = streamlines[:, :current_length, :].clone()
                 
-                # Increase step size
-                step = step +1 
-
+                # Convert to voxel coordinates
+                voxel_streamlines = ras_to_voxel(current_streamlines, self.inverse_affine).to(self.params.device)
+                
+                # Create brain indices (assuming single brain for all streamlines)
+                indices = torch.zeros(batch_size, dtype=torch.int32, device=self.params.device)
+                
+                # Create padding mask for current input (no padding for valid positions)
+                current_padding_mask = torch.zeros(batch_size, current_length, dtype=torch.bool, device=self.params.device)
+                
+                # Get model predictions
+                if past_kvs is None:
+                    # First forward pass - process all positions so far
+                    log_fodfs, past_kvs = self.model(
+                        self.dwi, 
+                        voxel_streamlines, 
+                        current_padding_mask, 
+                        indices, 
+                        past_kvs=None, 
+                        use_cache=True
+                    )
+                    # Only take the prediction for the last position
+                    log_fodfs = log_fodfs[:, -1:, :]
+                else:
+                    # Subsequent passes - only process the new position
+                    new_position = voxel_streamlines[:, -1:, :]  # Only the latest position
+                    new_padding_mask = torch.zeros(batch_size, 1, dtype=torch.bool, device=self.params.device)
+                    
+                    log_fodfs, past_kvs = self.model(
+                        self.dwi,
+                        new_position,
+                        new_padding_mask,
+                        indices,
+                        past_kvs=past_kvs,
+                        use_cache=True
+                    )
+                
+                # Convert to probabilities
+                fodfs = torch.exp(log_fodfs.squeeze(1))  # Remove sequence dimension since we only have 1 step
+                
+                # Calculate next positions for non-terminated streamlines
+                next_positions, terminated_in_curr_iter = get_next_step_from_fodf(
+                    fodfs.unsqueeze(1),  # Add sequence dimension back for compatibility
+                    current_streamlines,
+                    step, 
+                    sphere, 
+                    self
+                )
+                
+                # Update termination status
+                terminated_streamlines |= terminated_in_curr_iter
+                
+                # Update streamlines with next positions (only for non-terminated ones)
+                active_mask = ~terminated_streamlines
+                if active_mask.any():
+                    streamlines[active_mask, current_length, :] = next_positions[active_mask, :]
+                
+                # Increment current length for active streamlines
+                current_length += 1
+                
+                # For terminated streamlines, we need to update the KV cache to reflect that
+                # they won't contribute new tokens, but we keep the cache for consistency
+                
+                # Break if all streamlines are terminated
                 if torch.all(terminated_streamlines):
                     break
-
-        lengths = (~padding_mask).sum(dim=1)
+        
+        # Calculate actual lengths for each streamline
+        lengths = torch.zeros(batch_size, dtype=torch.long, device=self.params.device)
+        for i in range(batch_size):
+            # Find the first zero position (excluding the first position which is the seed)
+            non_zero_mask = torch.any(streamlines[i, 1:, :] != 0, dim=1)
+            if non_zero_mask.any():
+                lengths[i] = non_zero_mask.sum() + 1  # +1 for the seed point
+            else:
+                lengths[i] = 1  # Only the seed point
+        
         return streamlines, lengths
 
     def track(self):
         seed_points = init_seeds(self.params, self.wm_mask, self.affine, self.reference_tractogram, self.streamlines_lengths)
+        
+        # Extract just the seed points (first position) if seed_points has sequence dimension
+        if len(seed_points.shape) == 3:
+            seed_points = seed_points[:, 0, :]  # Take only the first position
+        
         num_streamlines = seed_points.size(0)
         all_streamlines = []
         sphere = get_sphere('repulsion724')
@@ -117,19 +182,28 @@ class Tracker(object):
         for start_idx in tqdm(range(0, num_streamlines, self.params.track_batch_size), desc="Tracking Streamlines"):
             end_idx = min(start_idx + self.params.track_batch_size, num_streamlines)
             seed_batch = seed_points[start_idx:end_idx]
+            
             start = time.time()
             batch_streamlines, batch_lengths = self.streamlines_tracking(seed_batch, sphere)
             end = time.time()
             print(f"TractTransformer: batch_time = {end-start}, batch={batch_num}")
 
-            streamlines_list = create_streamlines_from_tensor(voxel_to_ras(batch_streamlines,self.tractogram_inverse_affine), batch_lengths) #create_streamlines_from_tensor(voxel_to_ras(batch_streamlines,self.inverse_affine), batch_lengths)
+            # Convert to RAS coordinates and create streamline list
+            ras_streamlines = voxel_to_ras(batch_streamlines, self.tractogram_inverse_affine if hasattr(self, 'tractogram_inverse_affine') else self.inverse_affine)
+            streamlines_list = create_streamlines_from_tensor(ras_streamlines, batch_lengths)
             all_streamlines.extend(streamlines_list)
             batch_num += 1
 
+        # Filter short streamlines and create tractogram
         filtered_streamlines = filter_short_streamlines(all_streamlines, self.params.min_streamline_len)
-        tractogram = Tractogram(streamlines=filtered_streamlines, affine_to_rasmm=self.tractogram_affine)
-        header = self.tractogram_header
-
+        
+        affine_to_use = self.tractogram_affine if hasattr(self, 'tractogram_affine') else self.affine
+        tractogram = Tractogram(streamlines=filtered_streamlines, affine_to_rasmm=affine_to_use)
+        
+        header = self.tractogram_header if hasattr(self, 'tractogram_header') and self.tractogram_header is not None else {}
+        
         trk_file = nib.streamlines.TrkFile(tractogram, header=header)
         if self.params.save_tracking:
             nib.streamlines.save(trk_file, self.params.trk_file_saving_path)
+        
+        return filtered_streamlines

@@ -25,21 +25,54 @@ class TractoTransformer(nn.Module):
         #3D CNN layer
         self.cnn3d_layer = CNN3DLayer(params.num_gradients, params.device)
 
-        # Save causality mask
-        self.causality_mask = torch.triu(torch.ones(max_sequence_length, max_sequence_length, device=params.device), diagonal=1).bool() 
+        # Store max sequence length for mask generation
+        self.max_sequence_length = max_sequence_length
+        self.device = params.device
+
+    def _get_causality_mask(self, seq_len, cache_len=0):
+        """Generate causality mask that accounts for cached sequences"""
+        total_len = seq_len + cache_len
+        # Create mask for the full sequence (cached + new)
+        mask = torch.triu(torch.ones(seq_len, total_len, device=self.device), diagonal=cache_len+1).bool()
+        return mask
 
     def forward(self, dwi_data, streamline_voxels_batch, padding_mask, brain_indices, past_kvs=None, use_cache=False):
-        # Use 3D CNN to account for dwi values in the enviorment of each voxel in a steamline
+        # Use 3D CNN to account for dwi values in the environment of each voxel in a streamline
         center_features = self.cnn3d_layer(dwi_data, streamline_voxels_batch, brain_indices)
 
         # Apply positional encoding
-        x = self.dropout(self.positional_encoding(center_features))
+        batch_size, seq_len, _ = center_features.shape
+        
+        # Adjust positional encoding for cached sequences
+        if past_kvs is not None and len(past_kvs) > 0:
+            # Get the cache length from the first layer's past_kv
+            cache_len = past_kvs[0][0].shape[1] if past_kvs[0] is not None else 0
+            # Apply positional encoding starting from cache_len position
+            pos_start = cache_len
+            x = center_features + self.positional_encoding.encoding[pos_start:pos_start+seq_len, :].unsqueeze(0).to(center_features.device)
+        else:
+            cache_len = 0
+            pos_start = 0
+            x = center_features + self.positional_encoding.encoding[pos_start:pos_start+seq_len, :].unsqueeze(0).to(center_features.device)
+        
+        x = self.dropout(x)
+
+        # Generate causality mask accounting for cache
+        causality_mask = self._get_causality_mask(seq_len, cache_len)
+        
+        # Adjust padding mask for cached sequences if needed
+        if past_kvs is not None and len(past_kvs) > 0 and cache_len > 0:
+            # Extend padding mask to account for cached tokens (assume cached tokens are not padded)
+            cache_padding = torch.zeros(batch_size, cache_len, dtype=torch.bool, device=padding_mask.device)
+            extended_padding_mask = torch.cat([cache_padding, padding_mask], dim=1)
+        else:
+            extended_padding_mask = padding_mask
 
         # Apply decoder layers
         new_kvs = [] if use_cache else None
         for i, decoder_layer in enumerate(self.decoder_layers):
             past_kv = past_kvs[i] if past_kvs is not None else None
-            x, new_kv = decoder_layer(x, self.causality_mask, padding_mask, past_kv=past_kv, use_cache=use_cache)
+            x, new_kv = decoder_layer(x, causality_mask, extended_padding_mask, past_kv=past_kv, use_cache=use_cache)
             if use_cache:
                 new_kvs.append(new_kv)
 
@@ -49,7 +82,10 @@ class TractoTransformer(nn.Module):
         # Return probability distribution
         log_probabilities = F.log_softmax(outputs, dim=-1)
 
-        return log_probabilities
+        if use_cache:
+            return log_probabilities, new_kvs
+        else:
+            return log_probabilities
 
 
 class TransformerDecoderBlock(nn.Module):
@@ -62,17 +98,29 @@ class TransformerDecoderBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, causality_mask, padding_mask, past_kv=None, use_cache=False):
-        # Self-attention with optional past KV
+        # Prepare query, key, value for self-attention
+        query = x
+        
+        if past_kv is not None:
+            # Concatenate past keys and values with current input
+            past_key, past_value = past_kv
+            key = torch.cat([past_key, x], dim=1)
+            value = torch.cat([past_value, x], dim=1)
+        else:
+            key = x
+            value = x
+
+        # Self-attention
         attn_output, attn_weights = self.self_attn(
-            x,                                   # query
-            torch.cat([past_kv[0], x], dim=1) if past_kv is not None else x,  # key
-            torch.cat([past_kv[1], x], dim=1) if past_kv is not None else x,  # value
+            query,                          # Current tokens as query
+            key,                           # Past + current tokens as key
+            value,                         # Past + current tokens as value
             attn_mask=causality_mask,
             key_padding_mask=padding_mask,
-            is_causal=True,
             need_weights=False
         )
 
+        # Residual connection and layer norm
         x = x + self.dropout(attn_output)
         x = self.layer_norm1(x)
 
@@ -81,10 +129,18 @@ class TransformerDecoderBlock(nn.Module):
         x = x + self.dropout(ff_output)
         x = self.layer_norm2(x)
 
-        # Output new KV if caching is enabled
+        # Prepare new KV cache if needed
         if use_cache:
-            new_kv = (torch.cat([past_kv[0], x], dim=1) if past_kv else x,
-                    torch.cat([past_kv[1], x], dim=1) if past_kv else x)
+            if past_kv is not None:
+                # Update the cache with new keys and values
+                new_key = torch.cat([past_kv[0], x], dim=1)
+                new_value = torch.cat([past_kv[1], x], dim=1)
+            else:
+                # Initialize cache with current keys and values
+                new_key = x
+                new_value = x
+            
+            new_kv = (new_key, new_value)
             return x, new_kv
         else:
             return x, None
@@ -188,3 +244,4 @@ class CNN3DLayer(nn.Module):
         center_features = center_features.view(batch_size, max_sequence_length, num_gradients)
 
         return center_features
+        
