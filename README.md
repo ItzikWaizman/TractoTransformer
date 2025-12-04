@@ -117,3 +117,6 @@ python main.py --track
 ## 🧠 About TractoTransformer
 
 TractoTransformer leverages transformer architectures to model diffusion pathways in the brain, aiming to improve the accuracy and generalizability of tractography predictions. This repository offers an end-to-end pipeline from raw dMRI data to fiber tracking results.
+
+A trained model instance is given in:
+https://drive.google.com/file/d/19bgldl63OyPcy82U7WyOTE_HU8XgV17m/view?usp=drive_link
